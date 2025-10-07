@@ -4,7 +4,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
-      - 'clips/**'
+      - 'clips.zip'
   workflow_dispatch:
 
 jobs:
@@ -13,7 +13,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -25,21 +25,36 @@ jobs:
           python -m pip install --upgrade pip
           pip install Pillow
 
+      - name: Unzip uploaded clips (if provided)
+        if: ${{ hashFiles('clips.zip') != '' }}
+        run: |
+          unzip clips.zip ./
+
       - name: Extract clips
         run: |
           mkdir -p out
-          for i in ./clips/*.clips; do
+          for i in ./*.clips; do
             echo "Processing $i"
             python3 clips_extractor.py "$i" ./out
           done
 
-      - name: Package output
+      - name: Package processed output
         run: |
-          zip -r clips.zip ./out/*
+          zip -r clips_processed.zip ./out/*
 
-      - name: Upload artifact
+      - name: Prepare safe artifact name
+        id: sanitize
+        run: |
+          TITLE="${{ github.event.pull_request.title }}"
+          AUTHOR="${{ github.event.pull_request.user.login }}"
+          SAFE_TITLE=$(echo "$TITLE" | tr ' ' '_' | tr -cd '[:alnum:]_-')
+          SAFE_AUTHOR=$(echo "$AUTHOR" | tr -cd '[:alnum:]_-')
+          echo "name=processed_${SAFE_TITLE}_${SAFE_AUTHOR}" >> $GITHUB_OUTPUT
+
+      - name: Upload processed artifact
+        id: upload
         uses: actions/upload-artifact@v4
         with:
-          name: clips-zip
-          path: clips.zip
+          name: ${{ steps.sanitize.outputs.name }}
+          path: clips_processed.zip
           if-no-files-found: error
