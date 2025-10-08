@@ -8,51 +8,11 @@ from PIL import Image
 CLIPS_FILE = None
 OUT_DIR = None
 
-
-def read_utf_at(blob: bytearray, pos: int):
-    if pos+2 > len(blob):
-        raise EOFError("utf")
-    l = int.from_bytes(blob[pos:pos+2], "big")
-    s = blob[pos+2:pos+2+l].decode("utf-8")
-    return s, pos+2+l
-
-
-def find_clip_offsets(blob: bytes):
-    offsets = []
-    data_len = len(blob)
-    i = 0
-    for i in range(data_len-4):
-        try:
-            # Getting Anim ID
-            id_len = int.from_bytes(blob[i:i+2], 'big')
-            if not (1 <= id_len <= 200 and i+2+id_len < data_len):
-                continue
-            # read id_len bytes and check if ASCII
-            id_bytes = blob[i+2:i+2+id_len]
-            if not all(32 <= b < 127 for b in id_bytes):
-                continue
-            j = i+2+id_len
-            # Getting URL
-            if j+2 >= data_len:
-                continue
-            url_len = int.from_bytes(blob[j:j+2], 'big')
-            if not (1 <= url_len <= 400 and j+2+url_len < data_len):
-                continue
-            # read url_len bytes and check for url-like content
-            url_bytes = blob[j+2:j+2+url_len]
-            if b'/' in url_bytes or b'anim' in url_bytes or b'.png' in url_bytes or b'common' in url_bytes:
-                offsets.append(i)  # save starting offset
-        except Exception as e:
-            print(e)
-            pass
-    return offsets
-
-
 class ByteReader:
-    def __init__(self, blob, pos, end):
+    def __init__(self, blob, pos):
         self.blob = blob
         self.pos = pos
-        self.end = end
+        self.end = len(blob)
 
     def tell(self): return self.pos
 
@@ -292,6 +252,7 @@ class AnimClip:
         # parse header
         self.id = br.read_utf()
         self.url = br.read_utf()
+        print(f"Found Clip: {self.id} ({self.url}) at {hex(br.tell())}")
         options = br.read_u8()
         self.frame_count = br.read_u16()
         self.frame_rate = br.read_u8()
@@ -345,11 +306,9 @@ def decompressFrames(br: ByteReader, anim_id: str, frames: list[AnimFrame]):
             os.makedirs(f"{OUT_DIR}/{anim_id}", exist_ok=True)
             outname = f"{OUT_DIR}/{anim_id}/{fi:03d}.png"
             img.save(outname)
-            print(f"Saved {outname}")
-
+            br.seek(buf_end)
         except Exception as e:
             print(f"Failed to convert frame {anim_id}/{fi}: {e}")
-
 
 # MAIN
 if __name__ == "__main__":
@@ -368,21 +327,10 @@ if __name__ == "__main__":
         cf_compressed = cf.read()
         data = zlib.decompress(cf_compressed)
 
-    clip_offsets = find_clip_offsets(data)
-    if not clip_offsets:
-        raise SystemExit("no clips found")
-
-    clips = []
-    for i in range(len(clip_offsets)):
-        clip_start = clip_offsets[i]
-        clip_end = clip_offsets[i+1] if i+1 < len(clip_offsets) else len(data)
-        print(f"Clip{i} region:", clip_start,
-              clip_end, "len", clip_end-clip_start)
-        clips.append((clip_start, clip_end))
-
-    for i, clip in enumerate(clips):
-        br = ByteReader(data, *clip)
+    br = ByteReader(data, 0)
+    while br.tell() < len(data):
         parsed_clip = AnimClip()
         parsed_clip.readBytes(br)
-
+        print(f"Parsed Clip: {parsed_clip.id} | frames: {len(parsed_clip.frame_data.frames)}")
         decompressFrames(br, parsed_clip.id, parsed_clip.frame_data.frames)
+        print(f"Decompressed frames for {parsed_clip.id}. Output in {OUT_DIR}/{parsed_clip.id}/")
