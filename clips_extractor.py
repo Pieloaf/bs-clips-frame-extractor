@@ -8,6 +8,7 @@ from PIL import Image
 CLIPS_FILE = None
 OUT_DIR = None
 
+
 class ByteReader:
     def __init__(self, blob, pos):
         self.blob = blob
@@ -79,6 +80,8 @@ class AnimFrame:
     sheet: dict = field(default_factory=dict)
     bound: dict = field(default_factory=dict)  # TODO define Rect(x,y,w,h)
     children: list = field(default_factory=list)
+
+    image: Image.Image = None  # PIL image
 
     def readBytes(self, br: ByteReader, frameIndex: int):
         self.frame_num = br.read_s16()
@@ -251,6 +254,8 @@ class AnimClip:
     def readBytes(self, br: ByteReader):
         # parse header
         self.id = br.read_utf()
+        if self.id.endswith(".clipq"):
+            return
         self.url = br.read_utf()
         print(f"Found Clip: {self.id} ({self.url}) at {hex(br.tell())}")
         options = br.read_u8()
@@ -280,7 +285,7 @@ class AnimClip:
 def decompressFrames(br: ByteReader, anim_id: str, frames: list[AnimFrame]):
     base_offset = br.tell()
     for fi, f in enumerate(frames):
-        if not f.sheet:
+        if fi != f.frame_num or not f.sheet:
             continue
 
         # Get the compressed data
@@ -302,13 +307,62 @@ def decompressFrames(br: ByteReader, anim_id: str, frames: list[AnimFrame]):
             # Create image from bytes
             img = Image.frombytes('RGBA', (width, height), rgba_data)
 
+            f.image = img  # Store the image in the frame
             # Save as PNG
-            os.makedirs(f"{OUT_DIR}/{anim_id}", exist_ok=True)
-            outname = f"{OUT_DIR}/{anim_id}/{fi:03d}.png"
+            os.makedirs(f"{OUT_DIR}/{anim_id}/frames", exist_ok=True)
+            outname = f"{OUT_DIR}/{anim_id}/frames/{fi:03d}.png"
             img.save(outname)
             br.seek(buf_end)
         except Exception as e:
             print(f"Failed to convert frame {anim_id}/{fi}: {e}")
+
+
+def compileGif(frames: list[AnimFrame], fps: int, anim_id: str):
+    if not [f for f in frames if f.sheet]:
+        return
+    # Find the total bounds across all frames
+    min_x = min([int(f.offset["x"])
+                for f in frames if f.frame_num == frames.index(f)])
+    min_y = min([int(f.offset["y"])
+                for f in frames if f.frame_num == frames.index(f)])
+    max_x = max([int(f.offset["x"] + f.sheet["size"]["w"])
+                for f in frames if f.frame_num == frames.index(f)])
+    max_y = max([int(f.offset["y"] + f.sheet["size"]["h"])
+                for f in frames if f.frame_num == frames.index(f)])
+
+    # Calculate dimensions with padding to ensure centering
+    img_dim = {
+        "w": max_x - min_x,
+        "h": max_y - min_y
+    }
+
+    padded_frames: list[Image.Image] = []
+    # pad frames
+    for f in frames:
+        if f.frame_num != frames.index(f):
+            f.image = frames[f.frame_num].image
+            f.offset = frames[f.frame_num].offset
+            f.sheet = frames[f.frame_num].sheet
+
+        frame_img = Image.new(
+            'RGBA', (img_dim["w"], img_dim["h"]), (0, 0, 0, 0))
+        # Adjust paste position to account for the minimum offsets
+        paste_x = int(f.offset["x"] - min_x)
+        paste_y = int(f.offset["y"] - min_y)
+        frame_img.paste(f.image, (paste_x, paste_y))
+        padded_frames.append(frame_img)
+
+    padded_frames[0].save(
+        f"{OUT_DIR}/{anim_id}/{anim_id}.gif",
+        save_all=True,
+        append_images=padded_frames[1:],
+        # Note: using fps parameter here instead of hardcoded 24
+        duration=int(1000/fps),
+        loop=0,
+        disposal=2,
+        optimize=True
+    )
+
 
 # MAIN
 if __name__ == "__main__":
@@ -329,8 +383,15 @@ if __name__ == "__main__":
 
     br = ByteReader(data, 0)
     while br.tell() < len(data):
-        parsed_clip = AnimClip()
-        parsed_clip.readBytes(br)
-        print(f"Parsed Clip: {parsed_clip.id} | frames: {len(parsed_clip.frame_data.frames)}")
-        decompressFrames(br, parsed_clip.id, parsed_clip.frame_data.frames)
-        print(f"Decompressed frames for {parsed_clip.id}. Output in {OUT_DIR}/{parsed_clip.id}/")
+        clip = AnimClip()
+        clip.readBytes(br)
+        if not clip.id:
+            sys.exit(0)  # reached .clipq or invalid clip
+        print(
+            f"Parsed clip: {clip.id} | frames: {len(clip.frame_data.frames)}")
+        decompressFrames(br, clip.id, clip.frame_data.frames)
+        print(
+            f"Decompressed frames for {clip.id}. Output in {OUT_DIR}/{clip.id}/")
+        compileGif(clip.frame_data.frames,
+                   clip.frame_rate, clip.id)
+        print(f"Compiled GIF for {clip.id}")
